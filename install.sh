@@ -3,7 +3,7 @@
 # Project: Azure TG Manager (Universal Production Edition)
 # Compatibility: CentOS 7+ / RHEL 7+ / Debian 10+ / Ubuntu 20.04+ (GLIBC 2.17+)
 # Support: All Azure Subscriptions (AZ100, AZ200, PayG, MSDN, Enterprise)
-# Features: Dual-Stack, Two-Phase IP Binding, Cost API, Traffic Monitor, Auto-Scavenger
+# Features: 64GB P6 Free Disk, Dual-Stack, Two-Phase IP Binding, Cost & Traffic API
 # ==============================================================================
 
 set -e
@@ -133,7 +133,7 @@ from azure.mgmt.network.models import (
 )
 from azure.mgmt.compute.models import (
     VirtualMachine, HardwareProfile, StorageProfile, ImageReference,
-    OSProfile, NetworkProfile, NetworkInterfaceReference, RunCommandInput
+    OSDisk, OSProfile, NetworkProfile, NetworkInterfaceReference, RunCommandInput
 )
 
 with open('tg_config.json', 'r', encoding='utf-8') as f:
@@ -276,7 +276,7 @@ async def button_handler(update, context):
         alias = data.replace("acc_", ""); context.user_data['cur_alias'] = alias
         kb = [
             [InlineKeyboardButton("🖥️ 实例列表", callback_data="list_vms")],
-            [InlineKeyboardButton("➕ 动态开机 (双栈)", callback_data="new_vm")],
+            [InlineKeyboardButton("➕ 动态开机 (双栈/64G免费盘)", callback_data="new_vm")],
             [InlineKeyboardButton("💰 查本月账单 (Cost)", callback_data=f"cost_{alias}")],
             [InlineKeyboardButton("🔙 返回首页", callback_data="gohome")]
         ]
@@ -318,7 +318,7 @@ async def button_handler(update, context):
     elif data.startswith("ossel_"):
         os_id = data.split("_", 1)[1]
         size_id = context.user_data['cur_size']
-        await query.edit_message_text(f"🚀 下发双栈构建指令: `{size_id}` ...")
+        await query.edit_message_text(f"🚀 下发双栈构建指令: `{size_id}` (配置 64GB P6 系统盘)...")
         context.application.create_task(work_create_vm(query, context, accs[alias], alias, size_id, os_id))
 
     elif data == "list_vms":
@@ -489,9 +489,9 @@ async def work_vm_usage(q, c, acc, vm):
         msg = f"📊 **实例 `{vm}` 硬件用量统计**\n"
         msg += "—" * 20 + "\n"
         msg += f"⏱️ **持续运行时间**: `{up_str}`\n"
-        msg += f"📤 **本机出站流量**: `{tx_gb} GB` / 100 GB (月免费公网额度)\n"
-        msg += f"📥 **本机入站流量**: `{rx_gb} GB` (全免)\n\n"
-        msg += "💡 *小贴士: 出站流量由当前系统网卡物理统计，重启后会重置计数；微软整月免费公网出站为 100GB，正常使用完全不用担心超标。*"
+        msg += f"📤 **本机出站流量**: `{tx_gb} GB` / 100 GB (每月单向公网免费额度)\n"
+        msg += f"📥 **本机入站流量**: `{rx_gb} GB` (永久全免)\n\n"
+        msg += "💡 *小贴士: 出站流量由当前系统网卡物理统计，重启后会重置计数；微软官方每月免费公网出站为 100GB，入站流量不限且免费。*"
 
         kb = [[InlineKeyboardButton("🔙 返回控制台", callback_data=f"mg_{vm}")]]
         await q.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
@@ -595,20 +595,39 @@ async def work_create_vm(q, c, acc, alias, size_id, os_id):
         nic = await loop.run_in_executor(None, lambda: net.network_interfaces.begin_create_or_update(rg_name, created_nic_name, nic).result())
 
         admin_pwd = generate_strong_password()
+        # 显式指定 64GB 系统盘，精准命中 Azure 免费额度中的 P6 (64GB) 档位
         vm_params = VirtualMachine(
-            location=loc, hardware_profile=HardwareProfile(vm_size=size_id),
-            storage_profile=StorageProfile(image_reference=ImageReference(publisher=os_info['pub'], offer=os_info['offer'], sku=chosen_sku, version='latest')),
+            location=loc,
+            hardware_profile=HardwareProfile(vm_size=size_id),
+            storage_profile=StorageProfile(
+                image_reference=ImageReference(
+                    publisher=os_info['pub'],
+                    offer=os_info['offer'],
+                    sku=chosen_sku,
+                    version='latest'
+                ),
+                os_disk=OSDisk(create_option='FromImage', disk_size_gb=64)
+            ),
             os_profile=OSProfile(computer_name=vm_name, admin_username=admin_user, admin_password=admin_pwd),
             network_profile=NetworkProfile(network_interfaces=[NetworkInterfaceReference(id=nic.id, primary=True)])
         )
 
-        await q.edit_message_text(f"🚀 正在构建 `{vm_name}` (架构: {'ARM64' if is_arm else 'x86_64'})...")
+        await q.edit_message_text(f"🚀 正在构建 `{vm_name}` (架构: {'ARM64' if is_arm else 'x86_64'} | 系统盘: 64GB P6)...")
         await loop.run_in_executor(None, lambda: comp.virtual_machines.begin_create_or_update(rg_name, vm_name, vm_params).result())
 
         pip_v4_detail = await loop.run_in_executor(None, lambda: net.public_ip_addresses.get(rg_name, created_pip_v4_name))
         pip_v6_detail = await loop.run_in_executor(None, lambda: net.public_ip_addresses.get(rg_name, created_pip_v6_name))
 
-        receipt = f"✅ **双栈开机成功**\n{'='*20}\n**实例名称**: `{vm_name}`\n**架构类型**: `{'ARM64' if is_arm else 'x86_64'}`\n**公网 IPv4**: `{pip_v4_detail.ip_address}`\n**公网 IPv6**: `{pip_v6_detail.ip_address}`\n**登录账号**: `{admin_user}`\n**初始密码**: `{admin_pwd}`\n{'='*20}"
+        receipt = (
+            f"✅ **双栈开机成功**\n{'='*20}\n"
+            f"**实例名称**: `{vm_name}`\n"
+            f"**架构类型**: `{'ARM64' if is_arm else 'x86_64'}`\n"
+            f"**系统磁盘**: `64GB (P6 免费档)`\n"
+            f"**公网 IPv4**: `{pip_v4_detail.ip_address}`\n"
+            f"**公网 IPv6**: `{pip_v6_detail.ip_address}`\n"
+            f"**登录账号**: `{admin_user}`\n"
+            f"**初始密码**: `{admin_pwd}`\n{'='*20}"
+        )
         kb = [[InlineKeyboardButton(f"⚙️ 立即管理 {vm_name}", callback_data=f"mg_{vm_name}")]]
         await q.edit_message_text(receipt, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
     except Exception as e:
@@ -928,7 +947,3 @@ else
     echo "❌ 语法预检失败，拒绝重启以保护旧服务状态！"
     exit 1
 fi
-INSTALLER_EOF
-
-chmod +x /opt/install.sh
-/opt/install.sh
